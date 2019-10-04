@@ -1,0 +1,11 @@
+version: "3.7"
+services:
+  application-1:
+    build: ./
+    environment:
+      MESSAGES: 0
+      SECONDS: 120
+      DISCOVERY: "true"
+      DATASYNC: "true"
+      APPLICATIONS: "id1,id2,id3,id4"
+      command: tail -f /dev/null
