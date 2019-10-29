@@ -33,3 +33,14 @@ Where
 
 
 Either `-m` or `-s` needs to be specified.
+
+
+## Script
+
+```
+make build
+```
+
+```
+./status-protocol-bandwidth-test -public-chat-id=testpublicchat -src=test2 -port=30304 -dst=test1 -messages=100
+```

@@ -4,6 +4,8 @@ ENABLE_METRICS ?= true
 BUILD_FLAGS ?= $(shell echo "-ldflags '\
 	-X github.com/status-im/status-protocol-go/vendor/github.com/ethereum/go-ethereum/metrics.EnabledStr=$(ENABLE_METRICS)'")
 
+build:
+	go build -mod vendor
 test:
 	go test ./...
 .PHONY: test

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -62,7 +61,7 @@ func (b *Bstatus) Connect(id, addr string, datasync, discovery bool) error {
 	db, _ := sql.Open("sqlite3", "file:mem?mode=memory&cache=shared")
 	options := []status.Option{
 		status.WithDatabase(db),
-		status.WithSendV1Messages(),
+		//status.WithSendV1Messages(),
 	}
 
 	if datasync {
@@ -229,9 +228,9 @@ func main() {
 	dst := flag.String("dst", "application-2", "this application id")
 	numberOfMessages := flag.Int("messages", 0, "the number of messages to send")
 	numberOfSeconds := flag.Int("seconds", 0, "the number of senconds to run the simulation")
-	publicChatID := flag.String("public-chat-id", "", "The public chat id to publish messages")
+	publicChatID := flag.String("public-chat-id", "test200", "The public chat id to publish messages")
 	port := flag.Int("port", 30303, "The port to run geth on")
-	datasync := flag.Bool("datasync", true, "Enable datasync")
+	datasync := flag.Bool("datasync", false, "Enable datasync")
 	discoveryTopic := flag.Bool("discovery", false, "Enabled discovery")
 
 	flag.Parse()
@@ -239,14 +238,10 @@ func main() {
 	now := time.Now()
 	until := now.Add(time.Duration(*numberOfSeconds) * time.Second)
 
-	waitSeconds := 1 * time.Second
-
 	addr := fmt.Sprintf("[::]:%d", *port)
 
 	fmt.Printf("Src: %s, Dst: %s, NumberOfMessages: %d, NumberOfSeconds: %d, datasync: %s, discovery: %sPort: %d\n", *src, *dst, *numberOfMessages, *numberOfSeconds, *datasync, *discoveryTopic, *port)
 
-	dsts := strings.Split(*dst, ",")
-	var destinations []Destination
 	sourceDir := "/tmp/" + *src + "/"
 
 	os.MkdirAll(sourceDir, os.ModePerm)
@@ -261,38 +256,8 @@ func main() {
 		return
 	}
 
-	// Wait for the other node to be ready, pull the key
-
-	for _, dst := range dsts {
-		if dst == *src {
-			continue
-		}
-		var dstKey *ecdsa.PrivateKey
-		dstKeyFile := "/tmp/" + dst + "/key.txt"
-
-		for {
-			if _, err := os.Stat(dstKeyFile); err == nil {
-				dstKey, err = crypto.LoadECDSA(dstKeyFile)
-				if err != nil {
-					fmt.Printf("Error parsing key: %+v", err)
-					return
-
-				}
-				chatID := fmt.Sprintf("0x%s", hex.EncodeToString(crypto.FromECDSAPub(&dstKey.PublicKey)))
-				destinations = append(destinations, Destination{id: dst, key: dstKey, chatID: chatID})
-				if err := node.CreateOneToOne(chatID, &dstKey.PublicKey); err != nil {
-					fmt.Printf("Error connecting: %+v", err)
-					return
-				}
-				break
-			}
-
-			time.Sleep(1 * time.Second)
-		}
-	}
-
 	// Wait a bit, just to make sure all is ready
-	time.Sleep(5 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	if *publicChatID != "" {
 		if err := node.JoinChannel(*publicChatID); err != nil {
@@ -307,11 +272,6 @@ func main() {
 		return
 	}
 
-	privateWrite, err := os.Create(sourceDir + "private-write.txt")
-	if err != nil {
-		fmt.Printf("Error creating private file: %+v", err)
-		return
-	}
 	if _, err = node.messenger.LoadFilters(nil); err != nil {
 		fmt.Printf("Error loading filters: %+v", err)
 		return
@@ -322,7 +282,8 @@ func main() {
 	sentMessages := 0
 	for {
 		if *publicChatID != "" {
-			id1, err := node.Send(*publicChatID, []byte("test"))
+			id1, err := node.Send(*publicChatID, []byte(fmt.Sprintf("This is one line text message: %d", sentMessages)))
+
 			if err != nil {
 				fmt.Printf("Error connecting: %+v", err)
 				return
@@ -331,16 +292,6 @@ func main() {
 			publicWrite.WriteString(id1 + "\n")
 		}
 
-		chatID := destinations[rand.Intn(len(destinations))].chatID
-		id2, err := node.Send(chatID, []byte("test"))
-		if err != nil {
-			fmt.Printf("Error connecting: %+v", err)
-			return
-		}
-
-		privateWrite.WriteString(id2 + "\n")
-
-		time.Sleep(waitSeconds)
 		if *numberOfMessages != 0 {
 			sentMessages += 1
 			if sentMessages == *numberOfMessages {

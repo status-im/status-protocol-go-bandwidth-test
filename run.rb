@@ -27,6 +27,10 @@ OptionParser.new do |parser|
   parser.on('-d', '--datasync') do |d|
     env['DATASYNC'] = 'true'
   end
+
+  parser.on('-p', '--public-chat-id', String) do |p|
+    env['PUBLIC_CHAT_ID'] = 'test200'
+  end
   parser.on('-a', '--applications=n', OptionParser::DecimalInteger) do |app|
     applications = ''
     (1..app.to_i).each do |id|

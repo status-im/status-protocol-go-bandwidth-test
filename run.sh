@@ -9,7 +9,7 @@ for element in "${array[@]}"
 do
     echo "$element"
     mkdir /tmp/$element -p
-    ./status-protocol-bandwidth-test -src="$element" -dst="$APPLICATIONS" -messages="${MESSAGES}"  -seconds="${SECONDS}" -public-chat-id="${PUBLIC_CHAT}" -port=$PORT -datasync=${DATASYNC} -discovery=${DISCOVERY} 2> /tmp/$element/log.txt &
+    ./status-protocol-bandwidth-test -src="$element" -dst="$APPLICATIONS" -messages="${MESSAGES}"  -seconds="${SECONDS}" -public-chat-id="${PUBLIC_CHAT}" -port=$PORT -datasync=${DATASYNC} -discovery=${DISCOVERY} -public-chat-id=${PUBLIC_CHAT_ID} 2> /tmp/$element/log.txt &
 
     PID=$!
     PIDS+=($PID)
