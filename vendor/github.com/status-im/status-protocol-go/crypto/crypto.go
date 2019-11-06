@@ -16,17 +16,32 @@ const (
 	aesNonceLength = 12
 )
 
-// Sign signs the hash of an arbitrary string
-func Sign(content string, identity *ecdsa.PrivateKey) (string, error) {
-	signature, err := crypto.Sign(crypto.Keccak256([]byte(content)), identity)
+// SignBytes signs the hash of arbitrary data.
+func SignBytes(data []byte, identity *ecdsa.PrivateKey) ([]byte, error) {
+	return crypto.Sign(crypto.Keccak256(data), identity)
+}
+
+// SignStringAsHex signs the Keccak256 hash of arbitrary data and returns its hex representation.
+func SignBytesAsHex(data []byte, identity *ecdsa.PrivateKey) (string, error) {
+	signature, err := SignBytes(data, identity)
 	if err != nil {
 		return "", err
 	}
-
 	return hex.EncodeToString(signature), nil
 }
 
-// VerifySignatures verifys tuples of signatures content/hash/public key
+// SignStringAsHex signs the Keccak256 hash of arbitrary string and returns its hex representation.
+func SignStringAsHex(data string, identity *ecdsa.PrivateKey) (string, error) {
+	return SignBytesAsHex([]byte(data), identity)
+}
+
+// Sign signs the hash of arbitrary data.
+// DEPRECATED: use SignStringAsHex instead.
+func Sign(data string, identity *ecdsa.PrivateKey) (string, error) {
+	return SignStringAsHex(data, identity)
+}
+
+// VerifySignatures verifies tuples of signatures content/hash/public key
 func VerifySignatures(signaturePairs [][3]string) error {
 	for _, signaturePair := range signaturePairs {
 		content := crypto.Keccak256([]byte(signaturePair[0]))
@@ -63,6 +78,7 @@ func VerifySignatures(signaturePairs [][3]string) error {
 }
 
 // ExtractSignatures extract from tuples of signatures content a public key
+// DEPRECATED: use ExtractSignature
 func ExtractSignatures(signaturePairs [][2]string) ([]string, error) {
 	response := make([]string, len(signaturePairs))
 	for i, signaturePair := range signaturePairs {
@@ -85,6 +101,12 @@ func ExtractSignatures(signaturePairs [][2]string) ([]string, error) {
 	}
 
 	return response, nil
+}
+
+// ExtractSignature returns a public key for a given data and signature.
+func ExtractSignature(data, signature []byte) (*ecdsa.PublicKey, error) {
+	dataHash := crypto.Keccak256(data)
+	return crypto.SigToPub(dataHash, signature)
 }
 
 func EncryptSymmetric(key, plaintext []byte) ([]byte, error) {

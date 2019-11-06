@@ -15,6 +15,7 @@ import (
 	gonode "github.com/status-im/status-go/node"
 	params "github.com/status-im/status-go/params"
 	status "github.com/status-im/status-protocol-go"
+	gethbridge "github.com/status-im/status-protocol-go/bridge/geth"
 	v1 "github.com/status-im/status-protocol-go/v1"
 )
 
@@ -74,7 +75,7 @@ func (b *Bstatus) Connect(id, addr string, datasync, discovery bool) error {
 
 	messenger, err := status.NewMessenger(
 		b.privateKey,
-		shhService,
+		gethbridge.NewGethWhisperWrapper(shhService),
 		"test-1",
 		options...,
 	)
@@ -122,7 +123,7 @@ func (b *Bstatus) Connected() bool {
 
 func (b *Bstatus) generateConfig(id string, addr string) *params.NodeConfig {
 	options := []params.Option{
-		params.WithFleet(params.FleetBeta),
+		params.WithFleet(params.FleetStaging),
 		b.withListenAddr(addr),
 	}
 
@@ -291,6 +292,7 @@ func main() {
 
 			publicWrite.WriteString(id1 + "\n")
 		}
+		time.Sleep(300 * time.Millisecond)
 
 		if *numberOfMessages != 0 {
 			sentMessages += 1

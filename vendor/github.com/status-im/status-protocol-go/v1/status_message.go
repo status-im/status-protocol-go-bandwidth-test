@@ -4,7 +4,6 @@ import (
 	"crypto/ecdsa"
 	"log"
 
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/golang/protobuf/proto"
 	"github.com/jinzhu/copier"
@@ -12,13 +11,24 @@ import (
 	"github.com/status-im/status-protocol-go/applicationmetadata"
 	"github.com/status-im/status-protocol-go/datasync"
 	"github.com/status-im/status-protocol-go/encryption"
-	whisper "github.com/status-im/whisper/whisperv6"
+	whispertypes "github.com/status-im/status-protocol-go/transport/whisper/types"
+	statusproto "github.com/status-im/status-protocol-go/types"
+)
+
+type StatusMessageT int
+
+const (
+	MessageT StatusMessageT = iota + 1
+	MembershipUpdateMessageT
+	PairMessageT
 )
 
 // StatusMessage is any Status Protocol message.
 type StatusMessage struct {
 	// TransportMessage is the parsed message received from the transport layer, i.e the input
-	TransportMessage *whisper.Message
+	TransportMessage *whispertypes.Message
+	// MessageType is the type of application message contained
+	MessageType StatusMessageT
 	// ParsedMessage is the parsed message by the application layer, i.e the output
 	ParsedMessage interface{}
 
@@ -28,7 +38,7 @@ type StatusMessage struct {
 	DecryptedPayload []byte
 
 	// ID is the canonical ID of the message
-	ID hexutil.Bytes
+	ID statusproto.HexBytes
 	// Hash is the transport layer hash
 	Hash []byte
 
@@ -54,7 +64,7 @@ func (s *StatusMessage) Clone() (*StatusMessage, error) {
 	return copy, err
 }
 
-func (m *StatusMessage) HandleTransport(shhMessage *whisper.Message) error {
+func (m *StatusMessage) HandleTransport(shhMessage *whispertypes.Message) error {
 	publicKey, err := crypto.UnmarshalPubkey(shhMessage.Sig)
 	if err != nil {
 		return errors.Wrap(err, "failed to get signature")
@@ -144,6 +154,13 @@ func (m *StatusMessage) HandleApplication() error {
 		return err
 	}
 	m.ParsedMessage = value
-
+	switch m.ParsedMessage.(type) {
+	case Message:
+		m.MessageType = MessageT
+	case MembershipUpdateMessage:
+		m.MessageType = MembershipUpdateMessageT
+	case PairMessage:
+		m.MessageType = PairMessageT
+	}
 	return nil
 }

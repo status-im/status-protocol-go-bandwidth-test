@@ -348,7 +348,6 @@ func (n *Node) sendMessages() error {
 	}
 
 	return n.payloads.MapAndClear(func(peer state.PeerID, payload protobuf.Payload) error {
-		n.logger.Debug("SENDING PAYLOAD", zap.Int("ACKS", len(payload.Acks)))
 		err := n.transport.Send(n.ID, peer, payload)
 		if err != nil {
 			n.logger.Error("error sending message", zap.Error(err))
@@ -473,7 +472,7 @@ func (n *Node) onMessages(sender state.PeerID, messages []*protobuf.Message) [][
 		n.logger.Debug("sending ACK",
 			zap.String("groupID", hex.EncodeToString(groupID[:4])),
 			zap.String("from", hex.EncodeToString(n.ID[:4])),
-			zap.String("sender", hex.EncodeToString(sender[:4])),
+			zap.String("", hex.EncodeToString(sender[:4])),
 			zap.String("messageID", hex.EncodeToString(id[:4])),
 		)
 
@@ -493,9 +492,8 @@ func (n *Node) onMessage(sender state.PeerID, msg protobuf.Message) error {
 	)
 
 	err := n.syncState.Remove(id, sender)
-	if err != nil {
-		// Ignore errors
-		n.logger.Debug("FAILED to remove state", zap.Error(err))
+	if err != nil && err != state.ErrStateNotFound {
+		return err
 	}
 
 	err = n.store.Add(&msg)

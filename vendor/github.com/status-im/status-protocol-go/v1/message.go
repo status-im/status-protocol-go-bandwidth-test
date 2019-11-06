@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
+	statusproto "github.com/status-im/status-protocol-go/types"
 )
 
 const (
@@ -34,8 +34,9 @@ var (
 
 // Content contains the chat ID and the actual text of a message.
 type Content struct {
-	ChatID string `json:"chat_id"`
-	Text   string `json:"text"`
+	ChatID     string `json:"chat_id"`
+	Text       string `json:"text"`
+	ResponseTo string `json:"response-to"`
 }
 
 // TimestampInMs is a timestamp in milliseconds.
@@ -152,7 +153,7 @@ func EncodeMessage(value Message) ([]byte, error) {
 
 // MessageID calculates the messageID from author's compressed public key
 // and not encrypted but encoded payload.
-func MessageID(author *ecdsa.PublicKey, data []byte) hexutil.Bytes {
+func MessageID(author *ecdsa.PublicKey, data []byte) statusproto.HexBytes {
 	keyBytes := crypto.FromECDSAPub(author)
 	return crypto.Keccak256(append(keyBytes, data...))
 }

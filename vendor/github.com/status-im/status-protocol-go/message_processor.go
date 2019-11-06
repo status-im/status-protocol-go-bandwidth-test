@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"database/sql"
+	"reflect"
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -14,8 +15,8 @@ import (
 	"github.com/status-im/status-protocol-go/encryption"
 	"github.com/status-im/status-protocol-go/encryption/multidevice"
 	transport "github.com/status-im/status-protocol-go/transport/whisper"
+	whispertypes "github.com/status-im/status-protocol-go/transport/whisper/types"
 	protocol "github.com/status-im/status-protocol-go/v1"
-	whisper "github.com/status-im/whisper/whisperv6"
 	datasyncnode "github.com/vacp2p/mvds/node"
 	datasyncproto "github.com/vacp2p/mvds/protobuf"
 	"go.uber.org/zap"
@@ -28,11 +29,16 @@ const (
 	whisperPoWTime = 5
 )
 
+type messageHandler interface {
+	HandleMembershipUpdate(m protocol.MembershipUpdateMessage) error
+}
+
 type messageProcessor struct {
 	identity  *ecdsa.PrivateKey
 	datasync  *datasync.DataSync
 	protocol  *encryption.Protocol
 	transport *transport.WhisperServiceTransport
+	handler   messageHandler
 	logger    *zap.Logger
 
 	featureFlags featureFlags
@@ -43,6 +49,7 @@ func newMessageProcessor(
 	database *sql.DB,
 	enc *encryption.Protocol,
 	transport *transport.WhisperServiceTransport,
+	handler messageHandler,
 	logger *zap.Logger,
 	features featureFlags,
 ) (*messageProcessor, error) {
@@ -65,6 +72,7 @@ func newMessageProcessor(
 		datasync:     ds,
 		protocol:     enc,
 		transport:    transport,
+		handler:      handler,
 		logger:       logger,
 		featureFlags: features,
 	}
@@ -87,23 +95,17 @@ func (p *messageProcessor) Stop() {
 
 func (p *messageProcessor) SendPrivate(
 	ctx context.Context,
-	publicKey *ecdsa.PublicKey,
+	recipient *ecdsa.PublicKey,
 	chatID string,
 	data []byte,
 	clock int64,
 ) ([]byte, *protocol.Message, error) {
-	p.logger.Debug(
-		"sending a private message",
-		zap.Binary("public-key", crypto.FromECDSAPub(publicKey)),
-	)
-
 	message := protocol.CreatePrivateTextMessage(data, clock, chatID)
 	encodedMessage, err := p.encodeMessage(message)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to encode message")
 	}
-
-	messageID, err := p.sendPrivate(ctx, publicKey, encodedMessage)
+	messageID, err := p.sendPrivate(ctx, recipient, encodedMessage)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -113,23 +115,25 @@ func (p *messageProcessor) SendPrivate(
 // SendPrivateRaw takes encoded data, encrypts it and sends through the wire.
 func (p *messageProcessor) SendPrivateRaw(
 	ctx context.Context,
-	publicKey *ecdsa.PublicKey,
+	recipient *ecdsa.PublicKey,
 	data []byte,
 ) ([]byte, error) {
 	p.logger.Debug(
 		"sending a private message",
-		zap.Binary("public-key", crypto.FromECDSAPub(publicKey)),
+		zap.Binary("public-key", crypto.FromECDSAPub(recipient)),
 		zap.String("site", "SendPrivateRaw"),
 	)
-	return p.sendPrivate(ctx, publicKey, data)
+	return p.sendPrivate(ctx, recipient, data)
 }
 
 // sendPrivate sends data to the recipient identifying with a given public key.
 func (p *messageProcessor) sendPrivate(
 	ctx context.Context,
-	publicKey *ecdsa.PublicKey,
+	recipient *ecdsa.PublicKey,
 	data []byte,
 ) ([]byte, error) {
+	p.logger.Debug("sending private message", zap.Binary("recipient", crypto.FromECDSAPub(recipient)))
+
 	wrappedMessage, err := p.tryWrapMessageV1(data)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to wrap message")
@@ -138,33 +142,85 @@ func (p *messageProcessor) sendPrivate(
 	messageID := protocol.MessageID(&p.identity.PublicKey, wrappedMessage)
 
 	if p.featureFlags.datasync {
-		if err := p.addToDataSync(publicKey, wrappedMessage); err != nil {
+		if err := p.addToDataSync(recipient, wrappedMessage); err != nil {
 			return nil, errors.Wrap(err, "failed to send message with datasync")
 		}
 
 		// No need to call transport tracking.
 		// It is done in a data sync dispatch step.
 	} else {
-		messageSpec, err := p.protocol.BuildDirectMessage(p.identity, publicKey, wrappedMessage)
+		messageSpec, err := p.protocol.BuildDirectMessage(p.identity, recipient, wrappedMessage)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to encrypt message")
 		}
 
-		hash, newMessage, err := p.sendMessageSpec(ctx, publicKey, messageSpec)
+		hash, newMessage, err := p.sendMessageSpec(ctx, recipient, messageSpec)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to send a message spec")
 		}
 
-		p.transport.Track([][]byte{messageID}, hash, *newMessage)
+		p.transport.Track([][]byte{messageID}, hash, newMessage)
 	}
 
 	return messageID, nil
 }
 
-func (p *messageProcessor) SendPublic(ctx context.Context, chatID string, data []byte, clock int64) ([]byte, error) {
-	logger := p.logger.With(zap.String("site", "SendPublic"))
-	logger.Debug("sending a public message", zap.String("chatID", chatID))
+func (p *messageProcessor) SendGroup(
+	ctx context.Context,
+	recipients []*ecdsa.PublicKey,
+	chatID string,
+	data []byte,
+	clock int64,
+) ([][]byte, []*protocol.Message, error) {
+	p.logger.Debug("sending a group message", zap.Int("membersCount", len(recipients)))
 
+	message := protocol.CreatePrivateGroupTextMessage(data, clock, chatID)
+	encodedMessage, err := p.encodeMessage(message)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed to encode message")
+	}
+
+	var resultIDs [][]byte
+	for _, recipient := range recipients {
+		messageID, err := p.sendPrivate(ctx, recipient, encodedMessage)
+		if err != nil {
+			return nil, nil, err
+		}
+		resultIDs = append(resultIDs, messageID)
+	}
+	return resultIDs, nil, nil
+}
+
+func (p *messageProcessor) SendMembershipUpdate(
+	ctx context.Context,
+	recipients []*ecdsa.PublicKey,
+	chatID string,
+	updates []protocol.MembershipUpdate,
+	clock int64,
+) ([][]byte, error) {
+	p.logger.Debug("sending a membership update", zap.Int("membersCount", len(recipients)))
+
+	message := protocol.MembershipUpdateMessage{
+		ChatID:  chatID,
+		Updates: updates,
+	}
+	encodedMessage, err := protocol.EncodeMembershipUpdateMessage(message)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to encode membership update message")
+	}
+
+	var resultIDs [][]byte
+	for _, recipient := range recipients {
+		messageID, err := p.sendPrivate(ctx, recipient, encodedMessage)
+		if err != nil {
+			return nil, err
+		}
+		resultIDs = append(resultIDs, messageID)
+	}
+	return resultIDs, nil
+}
+
+func (p *messageProcessor) SendPublic(ctx context.Context, chatID string, data []byte, clock int64) ([]byte, error) {
 	message := protocol.CreatePublicTextMessage(data, clock, chatID)
 
 	encodedMessage, err := p.encodeMessage(message)
@@ -187,7 +243,7 @@ func (p *messageProcessor) SendPublic(ctx context.Context, chatID string, data [
 		return nil, err
 	}
 
-	hash, err := p.transport.SendPublic(ctx, &newMessage, chatID)
+	hash, err := p.transport.SendPublic(ctx, newMessage, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -201,21 +257,21 @@ func (p *messageProcessor) SendPublic(ctx context.Context, chatID string, data [
 
 // SendPublicRaw takes encoded data, encrypts it and sends through the wire.
 func (p *messageProcessor) SendPublicRaw(ctx context.Context, chatName string, data []byte) ([]byte, error) {
-	var newMessage whisper.NewMessage
+	var newMessage *whispertypes.NewMessage
 
 	wrappedMessage, err := p.tryWrapMessageV1(data)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to wrap message")
 	}
 
-	newMessage = whisper.NewMessage{
+	newMessage = &whispertypes.NewMessage{
 		TTL:       whisperTTL,
 		Payload:   wrappedMessage,
 		PowTarget: whisperPoW,
 		PowTime:   whisperPoWTime,
 	}
 
-	hash, err := p.transport.SendPublic(ctx, &newMessage, chatName)
+	hash, err := p.transport.SendPublic(ctx, newMessage, chatName)
 	if err != nil {
 		return nil, err
 	}
@@ -230,12 +286,10 @@ func (p *messageProcessor) SendPublicRaw(ctx context.Context, chatName string, d
 // Process processes received Whisper messages through all the layers
 // and returns decoded user messages.
 // It also handled all non-user messages like PairMessage.
-func (p *messageProcessor) Process(message *whisper.ReceivedMessage) ([]*protocol.Message, error) {
+func (p *messageProcessor) Process(shhMessage *whispertypes.Message) ([]*protocol.Message, error) {
 	logger := p.logger.With(zap.String("site", "Process"))
 
 	var decodedMessages []*protocol.Message
-
-	shhMessage := whisper.ToWhisperMessage(message)
 
 	hlogger := logger.With(zap.Binary("hash", shhMessage.Hash))
 	hlogger.Debug("handling a received message")
@@ -251,6 +305,18 @@ func (p *messageProcessor) Process(message *whisper.ReceivedMessage) ([]*protoco
 			m.ID = statusMessage.ID
 			m.SigPubKey = statusMessage.SigPubKey()
 			decodedMessages = append(decodedMessages, &m)
+		case protocol.MembershipUpdateMessage:
+			// Handle user message that can be attached to the membership update.
+			userMessage := m.Message
+			if userMessage != nil {
+				userMessage.ID = statusMessage.ID
+				userMessage.SigPubKey = statusMessage.SigPubKey()
+				decodedMessages = append(decodedMessages, userMessage)
+			}
+
+			if err := p.processMembershipUpdate(m); err != nil {
+				hlogger.Error("failed to process MembershipUpdateMessage", zap.Error(err))
+			}
 		case protocol.PairMessage:
 			fromOurDevice := isPubKeyEqual(statusMessage.SigPubKey(), &p.identity.PublicKey)
 			if !fromOurDevice {
@@ -262,11 +328,24 @@ func (p *messageProcessor) Process(message *whisper.ReceivedMessage) ([]*protoco
 				hlogger.Error("failed to process PairMessage", zap.Error(err))
 			}
 		default:
-			hlogger.Error("skipped a public message of unsupported type")
+			hlogger.Error(
+				"skipped a public message of unsupported type",
+				zap.String("type", reflect.TypeOf(m).String()),
+			)
 		}
 	}
 
 	return decodedMessages, nil
+}
+
+func (p *messageProcessor) processMembershipUpdate(m protocol.MembershipUpdateMessage) error {
+	if err := m.Verify(); err != nil {
+		return err
+	}
+	if p.handler != nil {
+		return p.handler.HandleMembershipUpdate(m)
+	}
+	return errors.New("missing handler")
 }
 
 func (p *messageProcessor) processPairMessage(m protocol.PairMessage) error {
@@ -283,7 +362,7 @@ func (p *messageProcessor) processPairMessage(m protocol.PairMessage) error {
 // layer message, or in case of Raw methods, the processing stops at the layer
 // before.
 // It returns an error only if the processing of required steps failed.
-func (p *messageProcessor) handleMessages(shhMessage *whisper.Message, applicationLayer bool) ([]*protocol.StatusMessage, error) {
+func (p *messageProcessor) handleMessages(shhMessage *whispertypes.Message, applicationLayer bool) ([]*protocol.StatusMessage, error) {
 	logger := p.logger.With(zap.String("site", "handleMessages"))
 	hlogger := logger.With(zap.Binary("hash", shhMessage.Hash))
 	var statusMessage protocol.StatusMessage
@@ -313,7 +392,7 @@ func (p *messageProcessor) handleMessages(shhMessage *whisper.Message, applicati
 		if applicationLayer {
 			err = statusMessage.HandleApplication()
 			if err != nil {
-				hlogger.Error("failed to handle application layer message")
+				hlogger.Error("failed to handle application layer message", zap.Error(err))
 			}
 		}
 	}
@@ -327,9 +406,8 @@ func (p *messageProcessor) handleEncryptionLayer(ctx context.Context, message *p
 
 	err := message.HandleEncryption(p.identity, publicKey, p.protocol)
 	if err == encryption.ErrDeviceNotFound {
-		handleErr := p.handleErrDeviceNotFound(ctx, publicKey)
-		if handleErr != nil {
-			logger.Error("failed to handle error", zap.Error(err), zap.NamedError("handleErr", handleErr))
+		if err := p.handleErrDeviceNotFound(ctx, publicKey); err != nil {
+			logger.Error("failed to handle ErrDeviceNotFound", zap.Error(err))
 		}
 	}
 	if err != nil {
@@ -423,13 +501,13 @@ func (p *messageProcessor) sendDataSync(ctx context.Context, publicKey *ecdsa.Pu
 		return err
 	}
 
-	p.transport.Track(messageIDs, hash, *newMessage)
+	p.transport.Track(messageIDs, hash, newMessage)
 
 	return nil
 }
 
 // sendMessageSpec analyses the spec properties and selects a proper transport method.
-func (p *messageProcessor) sendMessageSpec(ctx context.Context, publicKey *ecdsa.PublicKey, messageSpec *encryption.ProtocolMessageSpec) ([]byte, *whisper.NewMessage, error) {
+func (p *messageProcessor) sendMessageSpec(ctx context.Context, publicKey *ecdsa.PublicKey, messageSpec *encryption.ProtocolMessageSpec) ([]byte, *whispertypes.NewMessage, error) {
 	newMessage, err := messageSpecToWhisper(messageSpec)
 	if err != nil {
 		return nil, nil, err
@@ -442,33 +520,33 @@ func (p *messageProcessor) sendMessageSpec(ctx context.Context, publicKey *ecdsa
 	switch {
 	case messageSpec.SharedSecret != nil:
 		logger.Debug("sending using shared secret")
-		hash, err = p.transport.SendPrivateWithSharedSecret(ctx, &newMessage, publicKey, messageSpec.SharedSecret)
+		hash, err = p.transport.SendPrivateWithSharedSecret(ctx, newMessage, publicKey, messageSpec.SharedSecret)
 	case messageSpec.PartitionedTopicMode() == encryption.PartitionTopicV1:
 		logger.Debug("sending partitioned topic")
-		hash, err = p.transport.SendPrivateWithPartitioned(ctx, &newMessage, publicKey)
+		hash, err = p.transport.SendPrivateWithPartitioned(ctx, newMessage, publicKey)
 	case !p.featureFlags.genericDiscoveryTopicEnabled:
 		logger.Debug("sending partitioned topic (generic discovery topic disabled)")
-		hash, err = p.transport.SendPrivateWithPartitioned(ctx, &newMessage, publicKey)
+		hash, err = p.transport.SendPrivateWithPartitioned(ctx, newMessage, publicKey)
 	default:
 		logger.Debug("sending using discovery topic")
-		hash, err = p.transport.SendPrivateOnDiscovery(ctx, &newMessage, publicKey)
+		hash, err = p.transport.SendPrivateOnDiscovery(ctx, newMessage, publicKey)
 	}
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return hash, &newMessage, nil
+	return hash, newMessage, nil
 }
 
-func messageSpecToWhisper(spec *encryption.ProtocolMessageSpec) (whisper.NewMessage, error) {
-	var newMessage whisper.NewMessage
+func messageSpecToWhisper(spec *encryption.ProtocolMessageSpec) (*whispertypes.NewMessage, error) {
+	var newMessage *whispertypes.NewMessage
 
 	payload, err := proto.Marshal(spec.Message)
 	if err != nil {
 		return newMessage, err
 	}
 
-	newMessage = whisper.NewMessage{
+	newMessage = &whispertypes.NewMessage{
 		TTL:       whisperTTL,
 		Payload:   payload,
 		PowTarget: whisperPoW,
